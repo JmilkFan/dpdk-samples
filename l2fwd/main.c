@@ -46,7 +46,7 @@ static int mac_updating = 1;
 
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
 
-#define MAX_PKT_BURST 32
+#define MAX_PKT_BURST 32  // 限定突发数据包的数量。
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 #define MEMPOOL_CACHE_SIZE 256
 
@@ -55,29 +55,29 @@ static int mac_updating = 1;
  */
 #define RTE_TEST_RX_DESC_DEFAULT 1024
 #define RTE_TEST_TX_DESC_DEFAULT 1024
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;  // Rx Desc 的数量
+static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;  // Tx Desc 的数量
 
 /* ethernet addresses of ports */
 static struct ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
 
-/* mask of enabled ports */
+/* 是一个二进制掩码，用于标记哪些 Ports 是启用的，哪些是禁用的。*/
 static uint32_t l2fwd_enabled_port_mask = 0;
 
 /* list of enabled ports */
 static uint32_t l2fwd_dst_ports[RTE_MAX_ETHPORTS];
 
-static unsigned int l2fwd_rx_queue_per_lcore = 1;
+static unsigned int l2fwd_rx_queue_per_lcore = 1;  // 限定每个 lcore 拥有的 Rx ring queue 的数量。
 
-#define MAX_RX_QUEUE_PER_LCORE 16
-#define MAX_TX_QUEUE_PER_PORT 16
+#define MAX_RX_QUEUE_PER_LCORE 16  // 每个 lcore 最大处理 16 个 Rx ring queue。
+#define MAX_TX_QUEUE_PER_PORT 16   // 每个 Port 最大处理 16 个 Tx ring queue。
 struct lcore_queue_conf {
-	unsigned n_rx_port;
-	unsigned rx_port_list[MAX_RX_QUEUE_PER_LCORE];
+	unsigned n_rx_port;                             // Rx port 的数量
+	unsigned rx_port_list[MAX_RX_QUEUE_PER_LCORE];  // Rx port 的数组
 } __rte_cache_aligned;
-struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
+struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];  // 全局变量，各个 lcore 对应的 Rx ring queue 配置信息。
 
-static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
+static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];  // 每个 Ethernet device 对应的 Tx ring buffer，存储了多个 rte_mbuf。
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -100,8 +100,9 @@ struct l2fwd_port_statistics {
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 #define MAX_TIMER_PERIOD 86400 /* 1 day max */
-/* A tsc-based timer responsible for triggering statistics printout */
-static uint64_t timer_period = 10; /* default period is 10 seconds */
+
+/* 是一个 tsc-based 计时器，周期为 10s。*/
+static uint64_t timer_period = 10;
 
 /* Print out statistics on packets dropped */
 static void
@@ -117,7 +118,7 @@ print_stats(void)
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
 
-		/* Clear screen and move to top left */
+	/* Clear screen and move to top left */
 	printf("%s%s", clr, topLeft);
 
 	printf("\nPort statistics ====================================");
@@ -172,38 +173,39 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 	int sent;
 	struct rte_eth_dev_tx_buffer *buffer;
 
-	dst_port = l2fwd_dst_ports[portid];
+	dst_port = l2fwd_dst_ports[portid];  // 转发的目标端口，初始化阶段通过 “奇数-偶数” 算法进行了两两配对。
 
 	if (mac_updating)
-		l2fwd_mac_updating(m, dst_port);
+		l2fwd_mac_updating(m, dst_port);  // 将 Frame 的 dstMAC 设置为 02:00:00:00:00:xx。
 
-	buffer = tx_buffer[dst_port];
-	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
+	buffer = tx_buffer[dst_port];  // 匹配到 Port 自己的 Tx buffer 空间。
+
+	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);  // 将 Tx buffer 中的 rte_mbuf 缓存到 HW Tx ring buffer，等待后续的一次性发送。
 	if (sent)
-		port_statistics[dst_port].tx += sent;
+		port_statistics[dst_port].tx += sent;  // 数据统计
 }
 
-/* main processing loop */
+/* 数据面 Slave lcore threads 的 main 入口。*/
 static void
 l2fwd_main_loop(void)
 {
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];  // 批量处理 32 个 rte_mbuf。
 	struct rte_mbuf *m;
 	int sent;
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
 	unsigned i, j, portid, nb_rx;
 	struct lcore_queue_conf *qconf;
-	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
-			BURST_TX_DRAIN_US;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;  // 排空周期阈值。
 	struct rte_eth_dev_tx_buffer *buffer;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
 
-	lcore_id = rte_lcore_id();
-	qconf = &lcore_queue_conf[lcore_id];
+	lcore_id = rte_lcore_id();            // 获得自己的 lcore id。
+	qconf = &lcore_queue_conf[lcore_id];  // 通过 lcore id 获得自己的 Rx ring queue 配置信息。
 
+	/* 没有用于 Rx 的 Port，退出。*/
 	if (qconf->n_rx_port == 0) {
 		RTE_LOG(INFO, L2FWD, "lcore %u has nothing to do\n", lcore_id);
 		return;
@@ -213,69 +215,72 @@ l2fwd_main_loop(void)
 
 	for (i = 0; i < qconf->n_rx_port; i++) {
 
+		// 获得分配给 lcore 的所有 Ports。
 		portid = qconf->rx_port_list[i];
-		RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id,
-			portid);
+		RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id, portid);
 
 	}
 
+	/************************ L2 forwarding 收发包处理 ***************************/
 	while (!force_quit) {
 
 		cur_tsc = rte_rdtsc();
 
 		/*
-		 * TX burst queue drain
+		 * 周期性批量发送 Tx ring buffer 中的数据包。
 		 */
-		diff_tsc = cur_tsc - prev_tsc;
-		if (unlikely(diff_tsc > drain_tsc)) {
+		diff_tsc = cur_tsc - prev_tsc;         // 计算时间戳的差值，用于判断是否需要执行TX队列的排空操作。
+		if (unlikely(diff_tsc > drain_tsc)) {  // 如果时间戳差值超过排空阈值，开始发包。
 
-			for (i = 0; i < qconf->n_rx_port; i++) {
+			for (i = 0; i < qconf->n_rx_port; i++) {  // 对每个 Tx ring queue 执行排空操作。
 
-				portid = l2fwd_dst_ports[qconf->rx_port_list[i]];
-				buffer = tx_buffer[portid];
+				portid = l2fwd_dst_ports[qconf->rx_port_list[i]];  // 获取转发的目标端口。
+				buffer = tx_buffer[portid];                        // 匹配得到指定端口的 Tx ring buffer 空间。
 
+				/* 将 Tx ring buffer 中的数据包从指定端口发送出去，返回成功发送的数量，然后更新相应的统计信息。*/
 				sent = rte_eth_tx_buffer_flush(portid, 0, buffer);
 				if (sent)
 					port_statistics[portid].tx += sent;
-
 			}
 
 			/* if timer is enabled */
 			if (timer_period > 0) {
 
-				/* advance the timer */
-				timer_tsc += diff_tsc;
+				timer_tsc += diff_tsc;  // 叠加定时器的时间戳。
 
-				/* if timer has reached its timeout */
+				/* 如果定时器已达到超时时间 */
 				if (unlikely(timer_tsc >= timer_period)) {
 
-					/* do this only on master core */
+					/* 在 Master lcore 上周期打印统计数据 */
 					if (lcore_id == rte_get_master_lcore()) {
 						print_stats();
-						/* reset the timer */
+						/* 重置定时器时间戳 */
 						timer_tsc = 0;
 					}
 				}
 			}
 
-			prev_tsc = cur_tsc;
+			prev_tsc = cur_tsc;  // 更新时间戳
 		}
 
 		/*
-		 * Read packet from RX queues
+		 * 从 RX ring queues 中接受数据包。
 		 */
 		for (i = 0; i < qconf->n_rx_port; i++) {
-
 			portid = qconf->rx_port_list[i];
-			nb_rx = rte_eth_rx_burst(portid, 0,
-						 pkts_burst, MAX_PKT_BURST);
 
+			/* 批量收包。
+			 * 	nb_rx 返回批量收到的数据包的数量。
+			 * 	rte_mbuf 的指针都被保存在 pkts_burst。*/
+			nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
+
+			/* 统计数据。*/
 			port_statistics[portid].rx += nb_rx;
 
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
-				rte_prefetch0(rte_pktmbuf_mtod(m, void *));
-				l2fwd_simple_forward(m, portid);
+				rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // 数据预取函数，用于将地址指向的 rte_mbuf 从 Memory 预先加载到 CPU Cache 中，从而提高访问这些数据的效率。
+				l2fwd_simple_forward(m, portid);             // 进入 L2 forwarding 逻辑。
 			}
 		}
 	}
@@ -371,13 +376,17 @@ enum {
 	CMD_LINE_OPT_MIN_NUM = 256,
 };
 
+/* --[no-]mac-updating 指定开启或关闭 MAC 地址更新功能（默认为开启）。*/
 static const struct option lgopts[] = {
 	{ CMD_LINE_OPT_MAC_UPDATING, no_argument, &mac_updating, 1},
 	{ CMD_LINE_OPT_NO_MAC_UPDATING, no_argument, &mac_updating, 0},
 	{NULL, 0, 0, 0}
 };
 
-/* Parse the argument given in the command line of the application */
+/**
+ * 解析 l2fwd 专属的 CLI options。
+ * 	e.g. l2fwd -l 1-2 -- -p 0x3 -q 2 --mac-updating
+ */
 static int
 l2fwd_parse_args(int argc, char **argv)
 {
@@ -388,11 +397,12 @@ l2fwd_parse_args(int argc, char **argv)
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, short_options,
+	while ((opt = getopt_long(argc, argvopt, short_options,  // ？？？
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
-		/* portmask */
+
+		/* -p PORTMASK 指定要使用的 Ports 的十六进制位掩码（Bitmap）。*/
 		case 'p':
 			l2fwd_enabled_port_mask = l2fwd_parse_portmask(optarg);
 			if (l2fwd_enabled_port_mask == 0) {
@@ -402,7 +412,7 @@ l2fwd_parse_args(int argc, char **argv)
 			}
 			break;
 
-		/* nqueue */
+		/* -q nqueue 指定每个 lcore 的 Rx/Tx 队列数（默认为 1） */
 		case 'q':
 			l2fwd_rx_queue_per_lcore = l2fwd_parse_nqueue(optarg);
 			if (l2fwd_rx_queue_per_lcore == 0) {
@@ -510,6 +520,26 @@ signal_handler(int signum)
 	}
 }
 
+/* 打印 uint16_t 整数的二进制形式，调试时使用。*/
+static void print_binary(const char *var_name, uint16_t value) {
+	printf("%s :", var_name);
+    // 首先定义掩码
+    uint16_t mask = 0x8000;
+	int i;
+    // 循环16次，每次取最高位并输出
+    for (i = 0; i < 16; i++) {
+        // 使用位与运算符判断最高位是否为1
+        if (value & mask) {
+            printf("1");
+        } else {
+            printf("0");
+        }
+        // 将掩码右移一位，以便检查下一位
+        mask >>= 1;
+    }
+	printf("\n");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -520,10 +550,10 @@ main(int argc, char **argv)
 	uint16_t portid, last_port;
 	unsigned lcore_id, rx_lcore_id;
 	unsigned nb_ports_in_mask = 0;
-	unsigned int nb_lcores = 0;
+	unsigned int nb_lcores = 0;  // lcore 的数量。
 	unsigned int nb_mbufs;
 
-	/* init EAL */
+	/* 根据 EAL options 初始化 EAL 环境设置。*/
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
@@ -534,7 +564,7 @@ main(int argc, char **argv)
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 
-	/* parse application arguments (after the EAL ones) */
+	/* 提供除了 EAL options 之外的 L2fwd 专属的 CLI options。*/
 	ret = l2fwd_parse_args(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid L2FWD arguments\n");
@@ -544,28 +574,65 @@ main(int argc, char **argv)
 	/* convert to number of cycles */
 	timer_period *= rte_get_timer_hz();
 
+	/* 获取可用的 Eth Ports 数量。*/
 	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports == 0)
 		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 
-	/* check port mask to possible port mask */
+	/**
+	 * 检查 l2fwd_enabled_port_mask (-p portmask) 和 nb_ports 是否匹配。
+	 * 	True：没找到任何匹配的 Port；
+	 * 	False：找到至少一个匹配的 Port；
+	 **/
 	if (l2fwd_enabled_port_mask & ~((1 << nb_ports) - 1))
 		rte_exit(EXIT_FAILURE, "Invalid portmask; possible (0x%x)\n",
 			(1 << nb_ports) - 1);
+#ifdef DEBUG
+	/**
+	 * 测试：
+	 * 	l2fwd_enabled_port_mask：0x3
+	 * 	nb_ports：3
+	*/
+	printf("*********************************\n");
+	print_binary("nb_ports", nb_ports);                                 // 0000000000000011
+	print_binary("l2fwd_enabled_port_mask", l2fwd_enabled_port_mask);   // 0000000000000011
+	print_binary("(1 << nb_ports)", (1 << nb_ports));                   // 0000000000001000
+	print_binary("(1 << nb_ports) - 1", (1 << nb_ports) - 1);           // 0000000000000111
+	print_binary("~((1 << nb_ports) - 1)", ~((1 << nb_ports) - 1));     // 1111111111111000
+	print_binary("l2fwd_enabled_port_mask & ~((1 << nb_ports) - 1)", l2fwd_enabled_port_mask & ~((1 << nb_ports) - 1));  // 0000000000000000
+#endif
 
-	/* reset l2fwd_dst_ports */
+	/* 初始化可用 Ports 的列表。*/
 	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++)
 		l2fwd_dst_ports[portid] = 0;
-	last_port = 0;
 
-	/*
-	 * Each logical core is assigned a dedicated TX queue on each port.
+	printf("*********************************\n");
+	printf("portid: %d\n", portid);	// 此时 portid 为 32
+
+	/**
+	 * 宏 RTE_ETH_FOREACH_DEV 是一个 for 循环，用于遍历系统中所有已初始化且无所有者的 Ports。
 	 */
+	last_port = 0;
 	RTE_ETH_FOREACH_DEV(portid) {
-		/* skip ports that are not enabled */
+
+		printf("*********************************\n");
+		printf("portid: %d\n", portid);  // portid 分别为 0、1 循环了 2 次。
+
+		/* Port 没有 Enabled，跳过。*/
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
+			printf("skip port [%d] that are not enabled\n", portid);
 			continue;
 
+		/**
+		 *  Port 已经 Enabled，执行，执行 “偶数-奇数”负载均衡算法，有多对 Ports-Pair 时候生效。示例见官方部署示例图。
+		 * 	假设有 n 个 Ports，按照端口号从小到大排序，从 1 开始编号，那么奇数端口的编号为 1、3、5、...、n-1，偶数端口的编号为 2、4、6、...、n。
+		 * 	将相邻的奇数端口和偶数端口进行配对，即：
+		 * 		- Port1 和 Port2 配对；
+		 * 		- Port3 和 Port4 配对；
+		 * 		- Port n-1 和 Port n 配对。
+		 *  这样就可以将 n 个 Ports 分成 n/2 对，每个 Ports-Pair 包含一个奇数和一个偶数端口。
+		 *  在数据包转发时，可以将数据包随机分配到每个 Ports-Pair 中的任意一个端口进行处理，从而实现负载均衡的效果。
+		 */
 		if (nb_ports_in_mask % 2) {
 			l2fwd_dst_ports[portid] = last_port;
 			l2fwd_dst_ports[last_port] = portid;
@@ -574,135 +641,175 @@ main(int argc, char **argv)
 			last_port = portid;
 
 		nb_ports_in_mask++;
+		printf("nb_ports_in_mask: %d\n", nb_ports_in_mask);
 	}
 	if (nb_ports_in_mask % 2) {
 		printf("Notice: odd number of ports in portmask.\n");
 		l2fwd_dst_ports[last_port] = last_port;
 	}
+#ifdef DEBUG
+	size_t i;
+	size_t len = sizeof(l2fwd_dst_ports) / sizeof(uint32_t);
+	for (i = 0; i < len; i++) {
+		printf("l2fwd_dst_ports[%zu]: %d\n", i, l2fwd_dst_ports[i]);
+	}
+#endif
 
-	rx_lcore_id = 0;
+
+	/**
+	 * 宏 RTE_ETH_FOREACH_DEV 是一个 for 循环，用于遍历系统中所有已初始化且无所有者的 Ports。
+	 */
+	rx_lcore_id = 0;  // 绑定 Rx Ring queue 的 lcore，从 0 开始。
 	qconf = NULL;
-
-	/* Initialize the port/queue configuration of each logical core */
 	RTE_ETH_FOREACH_DEV(portid) {
-		/* skip ports that are not enabled */
+
+		printf("*********************************\n");
+		printf("portid: %d\n", portid);  // portid 分别为 0、1 循环了 2 次。
+
+		/* Port 没有 Enabled，跳过。*/
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
 			continue;
 
-		/* get the lcore_id for this port */
-		while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
-		       lcore_queue_conf[rx_lcore_id].n_rx_port ==
-		       l2fwd_rx_queue_per_lcore) {
+		/**
+		 * Port 已经 Enabled。
+		 * 当 lcore thread 还没有 enabled 或 lcore 的 Rx ring queue 的 Port 数量为 1 时，rx_lcore_id+1。
+		 */
+		while (rte_lcore_is_enabled(rx_lcore_id) == 0 || lcore_queue_conf[rx_lcore_id].n_rx_port == l2fwd_rx_queue_per_lcore) {
 			rx_lcore_id++;
 			if (rx_lcore_id >= RTE_MAX_LCORE)
 				rte_exit(EXIT_FAILURE, "Not enough cores\n");
 		}
+		printf("rx_lcore_id: %d\n", rx_lcore_id);
+
 
 		if (qconf != &lcore_queue_conf[rx_lcore_id]) {
-			/* Assigned a new logical core in the loop above. */
+			/* 分配一个新的 lcore。*/
 			qconf = &lcore_queue_conf[rx_lcore_id];
 			nb_lcores++;
 		}
+		printf("nb_lcores: %d\n", nb_lcores);
+
 
 		qconf->rx_port_list[qconf->n_rx_port] = portid;
 		qconf->n_rx_port++;
-		printf("Lcore %u: RX port %u\n", rx_lcore_id, portid);
+		printf("Rx Lcore (slave) %u: RX port %u\n", rx_lcore_id, portid);
 	}
 
-	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST +
-		nb_lcores * MEMPOOL_CACHE_SIZE), 8192U);
+	/**
+	 * 计算 nb_mbufs 的数量。
+	 * RTE_MAX 返回比较大的数字，则最小为 8192 个 unsigned int。
+	 */
+	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST + nb_lcores * MEMPOOL_CACHE_SIZE),
+	 				   8192U);
 
-	/* create the mbuf pool */
-	l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", nb_mbufs,
-		MEMPOOL_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE,
-		rte_socket_id());
+	/**
+	 * 创建 Packet mbuf pool。
+	 * rte_socket_id 用于获取 lcore 所在的 Physical CPU Socket 的 ID。
+	 */
+	l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create(
+							"mbuf_pool",
+							nb_mbufs,
+							MEMPOOL_CACHE_SIZE,
+							0,
+							RTE_MBUF_DEFAULT_BUF_SIZE,
+							rte_socket_id());
 	if (l2fwd_pktmbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
-	/* Initialise each port */
-	RTE_ETH_FOREACH_DEV(portid) {
-		struct rte_eth_rxconf rxq_conf;
-		struct rte_eth_txconf txq_conf;
-		struct rte_eth_conf local_port_conf = port_conf;
-		struct rte_eth_dev_info dev_info;
 
-		/* skip ports that are not enabled */
+	/**
+	 * 宏 RTE_ETH_FOREACH_DEV 是一个 for 循环，用于遍历系统中所有已初始化且无所有者的 Ports。
+	 */
+	RTE_ETH_FOREACH_DEV(portid) {
+		struct rte_eth_rxconf rxq_conf;  // HW Rx ring queue 的配置信息
+		struct rte_eth_txconf txq_conf;  // HW Tx ring queue 的配置信息
+
+		struct rte_eth_conf local_port_conf = port_conf;  // Ethernet port 的配置信息
+		struct rte_eth_dev_info dev_info;                 // Ethernet device 的配置信息
+
+		/* Port 没有 Enabled，跳过。*/
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0) {
 			printf("Skipping disabled port %u\n", portid);
 			continue;
 		}
-		nb_ports_available++;
 
-		/* init port */
+		nb_ports_available++;
+	
+		/******************************** Initialize port ********************************/
 		printf("Initializing port %u... ", portid);
-		fflush(stdout);
-		rte_eth_dev_info_get(portid, &dev_info);
+		fflush(stdout);  // 刷新
+		rte_eth_dev_info_get(portid, &dev_info);  // 获取 portid 对应的 Ethernet device 信息。
+
+		/* Ethernet device 是否开启 HW Tx offload 功能。*/
 		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+				DEV_TX_OFFLOAD_MBUF_FAST_FREE;  // Device supports multi segment send
+
+		/* 设置 Ethernet device 的配置。*/
 		ret = rte_eth_dev_configure(portid, 1, 1, &local_port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
 				  ret, portid);
 
-		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
-						       &nb_txd);
+		/* 调整（adjust）Ethernet device 的 Rx/Tx ring buffer 的 descriptors 的数量。*/
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE,
 				 "Cannot adjust number of descriptors: err=%d, port=%u\n",
 				 ret, portid);
 
+		/* 获取 Ethernet device 的 MAC 地址。*/
 		rte_eth_macaddr_get(portid,&l2fwd_ports_eth_addr[portid]);
 
-		/* init one RX queue */
+
+		/******************************** Initialize one RX queue ********************************/
+		printf("Initializing one Rx queue of port %u... ", portid);
 		fflush(stdout);
-		rxq_conf = dev_info.default_rxconf;
+		rxq_conf = dev_info.default_rxconf;  // HW Rx ring queue 的配置信息
 		rxq_conf.offloads = local_port_conf.rxmode.offloads;
-		ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
-					     rte_eth_dev_socket_id(portid),
-					     &rxq_conf,
-					     l2fwd_pktmbuf_pool);
+
+		/* 设置 Ethernet device 的 Rx ring queue。*/
+		ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, rte_eth_dev_socket_id(portid), &rxq_conf, l2fwd_pktmbuf_pool);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup:err=%d, port=%u\n",
 				  ret, portid);
 
-		/* init one TX queue on each port */
+		/******************************** Initialize one Tx queue on each port ********************************/
+		printf("Initializing one Tx queue on each port %u... ", portid);
 		fflush(stdout);
-		txq_conf = dev_info.default_txconf;
+		txq_conf = dev_info.default_txconf;  // HW Tx ring queue 的配置信息
 		txq_conf.offloads = local_port_conf.txmode.offloads;
-		ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
-				rte_eth_dev_socket_id(portid),
-				&txq_conf);
+
+		/* 设置 Ethernet device 的 Tx ring queue。*/
+		ret = rte_eth_tx_queue_setup(portid, 0, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
 		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u\n",
-				ret, portid);
-
-		/* Initialize TX buffers */
-		tx_buffer[portid] = rte_zmalloc_socket("tx_buffer",
-				RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0,
-				rte_eth_dev_socket_id(portid));
+			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u\n", ret, portid);
+	
+		/* 分配 TX ring queue 的 buffers 空间。*/
+		tx_buffer[portid] = rte_zmalloc_socket("tx_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_PKT_BURST), 0, rte_eth_dev_socket_id(portid));
 		if (tx_buffer[portid] == NULL)
-			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n",
-					portid);
-
+			rte_exit(EXIT_FAILURE, "Cannot allocate buffer for tx on port %u\n", portid);
+	
+		/* 初始化 TX ring queue 的 buffers 空间。*/
 		rte_eth_tx_buffer_init(tx_buffer[portid], MAX_PKT_BURST);
 
-		ret = rte_eth_tx_buffer_set_err_callback(tx_buffer[portid],
+		/* 为无法 Send 出去的 rte_mbuf 设置回调函数。*/
+		ret = rte_eth_tx_buffer_set_err_callback(
+				tx_buffer[portid],
 				rte_eth_tx_buffer_count_callback,
 				&port_statistics[portid].dropped);
 		if (ret < 0)
-			rte_exit(EXIT_FAILURE,
-			"Cannot set error callback for tx buffer on port %u\n",
-				 portid);
+			rte_exit(EXIT_FAILURE, "Cannot set error callback for tx buffer on port %u\n", portid);
 
-		/* Start device */
+
+		/******************************** Start Ethernet device ********************************/
+		printf("Starting Ethernet device of port %u... ", portid);
 		ret = rte_eth_dev_start(portid);
 		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n",
-				  ret, portid);
-
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n", ret, portid);
 		printf("done: \n");
 
+		/* 为 Ethernet device 启用混杂模式收包特性。*/
 		rte_eth_promiscuous_enable(portid);
 
 		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
@@ -714,20 +821,23 @@ main(int argc, char **argv)
 				l2fwd_ports_eth_addr[portid].addr_bytes[4],
 				l2fwd_ports_eth_addr[portid].addr_bytes[5]);
 
-		/* initialize port stats */
+		/* 初始化 Port 的数据统计，包括 rx、tx、drop 等数据。*/
 		memset(&port_statistics, 0, sizeof(port_statistics));
 	}
+	printf("Ethernet device init complate, nb_ports_available: %d\n", nb_ports_available);
 
+	
 	if (!nb_ports_available) {
-		rte_exit(EXIT_FAILURE,
-			"All available ports are disabled. Please set portmask.\n");
+		rte_exit(EXIT_FAILURE, "All available ports are disabled. Please set portmask.\n");
 	}
 
 	check_all_ports_link_status(l2fwd_enabled_port_mask);
 
-	ret = 0;
-	/* launch per-lcore init on every lcore */
+	/* 启动所有 lcore threads，开始进入 l2fwd_launch_one_lcore 数据面处理。*/
 	rte_eal_mp_remote_launch(l2fwd_launch_one_lcore, NULL, CALL_MASTER);
+	
+	/* 永循环所有 Slave lcore 等待退出。*/
+	ret = 0;
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0) {
 			ret = -1;
@@ -735,9 +845,16 @@ main(int argc, char **argv)
 		}
 	}
 
+
+	/**
+	 * 宏 RTE_ETH_FOREACH_DEV 是一个 for 循环，用于遍历系统中所有已初始化且无所有者的 Ports。
+	 */
 	RTE_ETH_FOREACH_DEV(portid) {
+		/* Port 没有 Enabled，跳过。*/
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
 			continue;
+		
+		/* Port 已经 Enabled，开始退出。*/
 		printf("Closing port %d...", portid);
 		rte_eth_dev_stop(portid);
 		rte_eth_dev_close(portid);

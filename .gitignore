@@ -1,3 +1,10 @@
+# Make build and docs file
+*/build
+*/docs
+*/GPATH
+*/GRTAGS
+*/GTAGS
+
 # Prerequisites
 *.d
 
