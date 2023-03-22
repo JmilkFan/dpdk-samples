@@ -33,7 +33,7 @@
 /* Used to mark destination port as 'invalid'. */
 #define	BAD_PORT ((uint16_t)-1)
 
-#define FWDSTEP	4
+#define FWDSTEP	4  // 用于决定一次转发多少个 pkts。
 
 /* replace first 12B of the ethernet header. */
 #define	MASK_ETH 0x3f
@@ -63,9 +63,9 @@ struct lcore_conf {
 	struct lcore_rx_queue rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
 	uint16_t n_tx_port;
 	uint16_t tx_port_id[RTE_MAX_ETHPORTS];
-	uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
-	struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];
-	void *ipv4_lookup_struct;
+	uint16_t tx_queue_id[RTE_MAX_ETHPORTS];  // lcore 自己的 Tx queue id 数组，index 是 portid
+	struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];  // lcote 自己的发包缓冲区
+	void *ipv4_lookup_struct;  // lcore 自己的 IPv4 lookup table
 	void *ipv6_lookup_struct;
 } __rte_cache_aligned;
 
@@ -97,6 +97,9 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint16_t port)
 	queueid = qconf->tx_queue_id[port];
 	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
 
+	/**
+	 * 从哪个端口 / 哪条队列 / 发出的 mbuf / 发多少个包
+	 */
 	ret = rte_eth_tx_burst(port, queueid, m_table, n);
 	if (unlikely(ret < n)) {
 		do {
@@ -107,21 +110,22 @@ send_burst(struct lcore_conf *qconf, uint16_t n, uint16_t port)
 	return 0;
 }
 
-/* Enqueue a single packet, and send burst if queue is filled */
+/* 对单个 pkt 进行缓存，如果缓存已满则批量发送 */
 static inline int
 send_single_packet(struct lcore_conf *qconf,
 		   struct rte_mbuf *m, uint16_t port)
 {
 	uint16_t len;
 
+	/* 将该 mbuf 加入目标转发端口的 Tx buffer */
 	len = qconf->tx_mbufs[port].len;
 	qconf->tx_mbufs[port].m_table[len] = m;
-	len++;
+	len++;  
 
-	/* enough pkts to be sent */
+	/* 当目标转发端口 Tx buffer 已满则批量发送 */
 	if (unlikely(len == MAX_PKT_BURST)) {
 		send_burst(qconf, MAX_PKT_BURST, port);
-		len = 0;
+		len = 0;  // 清空 Tx buffer
 	}
 
 	qconf->tx_mbufs[port].len = len;
@@ -129,6 +133,7 @@ send_single_packet(struct lcore_conf *qconf,
 }
 
 #ifdef DO_RFC_1812_CHECKS
+/* 检查 IP Packet 是否符合网络层标准 */
 static inline int
 is_valid_ipv4_pkt(struct ipv4_hdr *pkt, uint32_t link_len)
 {
@@ -137,7 +142,7 @@ is_valid_ipv4_pkt(struct ipv4_hdr *pkt, uint32_t link_len)
 	 * 1. The packet length reported by the Link Layer must be large
 	 * enough to hold the minimum length legal IP datagram (20 bytes).
 	 */
-	if (link_len < sizeof(struct ipv4_hdr))
+	if (link_len < sizeof(struct ipv4_hdr))  // IP Packet 长度不能短于 Header 长度（20Bytes）
 		return -1;
 
 	/* 2. The IP checksum must be correct. */
@@ -148,13 +153,13 @@ is_valid_ipv4_pkt(struct ipv4_hdr *pkt, uint32_t link_len)
 	 * then the packet may be another version of IP, such as IPng or
 	 * ST-II.
 	 */
-	if (((pkt->version_ihl) >> 4) != 4)
+	if (((pkt->version_ihl) >> 4) != 4)  // 版本号字段必须是 4
 		return -3;
 	/*
 	 * 4. The IP header length field must be large enough to hold the
 	 * minimum length legal IP datagram (20 bytes = 5 words).
 	 */
-	if ((pkt->version_ihl & 0xf) < 5)
+	if ((pkt->version_ihl & 0xf) < 5)  // IP header length 字段的值必须大于 5
 		return -4;
 
 	/*
@@ -162,7 +167,7 @@ is_valid_ipv4_pkt(struct ipv4_hdr *pkt, uint32_t link_len)
 	 * datagram header, whose length is specified in the IP header length
 	 * field.
 	 */
-	if (rte_cpu_to_be_16(pkt->total_length) < sizeof(struct ipv4_hdr))
+	if (rte_cpu_to_be_16(pkt->total_length) < sizeof(struct ipv4_hdr))  // 总长度字段的值要大于等于 20
 		return -5;
 
 	return 0;

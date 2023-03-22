@@ -140,6 +140,7 @@ send_packets_multi(struct lcore_conf *qconf, struct rte_mbuf **pkts_burst,
 		lp = pnum;
 		lp[0] = 1;
 
+		/* Step3: 批量编辑 pkts 的 dstPort */
 		processx4_step3(pkts_burst, dst_port);
 
 		/* dp1: <d[0], d[1], d[2], d[3], ... > */

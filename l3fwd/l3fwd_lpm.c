@@ -27,10 +27,11 @@
 
 #include "l3fwd.h"
 
+/* LPM table entry */
 struct ipv4_l3fwd_lpm_route {
-	uint32_t ip;
-	uint8_t  depth;
-	uint8_t  if_out;
+	uint32_t ip;      // IP 地址
+	uint8_t  depth;   // 前缀位数（掩码）
+	uint8_t  if_out;  // 下一跳
 };
 
 struct ipv6_l3fwd_lpm_route {
@@ -39,7 +40,9 @@ struct ipv6_l3fwd_lpm_route {
 	uint8_t  if_out;
 };
 
+/* 预先定义的 LPM entries。*/
 static struct ipv4_l3fwd_lpm_route ipv4_l3fwd_lpm_route_array[] = {
+	//  IP 地址 前缀位数（掩码） 下一跳
 	{IPv4(1, 1, 1, 0), 24, 0},
 	{IPv4(2, 1, 1, 0), 24, 1},
 	{IPv4(3, 1, 1, 0), 24, 2},
@@ -67,23 +70,21 @@ static struct ipv6_l3fwd_lpm_route ipv6_l3fwd_lpm_route_array[] = {
 	(sizeof(ipv6_l3fwd_lpm_route_array) / sizeof(ipv6_l3fwd_lpm_route_array[0]))
 
 #define IPV4_L3FWD_LPM_MAX_RULES         1024
-#define IPV4_L3FWD_LPM_NUMBER_TBL8S (1 << 8)
+#define IPV4_L3FWD_LPM_NUMBER_TBL8S (1 << 8)  // NUMBER_TBL8S PLM 表格类型，TBL8S 表示表格类型最多可以支持 8 个二进制位的前缀匹配。
 #define IPV6_L3FWD_LPM_MAX_RULES         1024
 #define IPV6_L3FWD_LPM_NUMBER_TBL8S (1 << 16)
 
 struct rte_lpm *ipv4_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
+/* 根据 dstIP 查 LPM 表，获得下一跳转发端口。*/
 static inline uint16_t
 lpm_get_ipv4_dst_port(void *ipv4_hdr, uint16_t portid, void *lookup_struct)
 {
 	uint32_t next_hop;
-	struct rte_lpm *ipv4_l3fwd_lookup_struct =
-		(struct rte_lpm *)lookup_struct;
+	struct rte_lpm *ipv4_l3fwd_lookup_struct = (struct rte_lpm *)lookup_struct;
 
-	return (uint16_t) ((rte_lpm_lookup(ipv4_l3fwd_lookup_struct,
-		rte_be_to_cpu_32(((struct ipv4_hdr *)ipv4_hdr)->dst_addr),
-		&next_hop) == 0) ? next_hop : portid);
+	return (uint16_t) ((rte_lpm_lookup(ipv4_l3fwd_lookup_struct, rte_be_to_cpu_32(((struct ipv4_hdr *)ipv4_hdr)->dst_addr), &next_hop) == 0) ? next_hop : portid);
 }
 
 static inline uint16_t
@@ -171,21 +172,21 @@ lpm_get_dst_port_with_ipv4(const struct lcore_conf *qconf, struct rte_mbuf *pkt,
 int
 lpm_main_loop(__attribute__((unused)) void *dummy)
 {
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];  // 收包缓冲区
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc;
 	int i, nb_rx;
 	uint16_t portid;
 	uint8_t queueid;
 	struct lcore_conf *qconf;
-	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) /
-		US_PER_S * BURST_TX_DRAIN_US;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;  // 每隔一段时间发包的计时器
 
 	prev_tsc = 0;
 
-	lcore_id = rte_lcore_id();
-	qconf = &lcore_conf[lcore_id];
+	lcore_id = rte_lcore_id();  // 获得当前 lcore 的 id。
+	qconf = &lcore_conf[lcore_id];  // 通过 lcore id 获得自己的 Rx queue 配置信息。
 
+	/* 该 lcore 没有 Rx queue。*/
 	if (qconf->n_rx_queue == 0) {
 		RTE_LOG(INFO, L3FWD, "lcore %u has nothing to do\n", lcore_id);
 		return 0;
@@ -193,8 +194,8 @@ lpm_main_loop(__attribute__((unused)) void *dummy)
 
 	RTE_LOG(INFO, L3FWD, "entering main loop on lcore %u\n", lcore_id);
 
+	/* 打印该 lcore 具有的每条 Rx queue。 */
 	for (i = 0; i < qconf->n_rx_queue; i++) {
-
 		portid = qconf->rx_queue_list[i].port_id;
 		queueid = qconf->rx_queue_list[i].queue_id;
 		RTE_LOG(INFO, L3FWD,
@@ -207,11 +208,12 @@ lpm_main_loop(__attribute__((unused)) void *dummy)
 		cur_tsc = rte_rdtsc();
 
 		/*
-		 * TX burst queue drain
+		 * 周期性批量发送 Tx buffer 中的数据包。
 		 */
-		diff_tsc = cur_tsc - prev_tsc;
-		if (unlikely(diff_tsc > drain_tsc)) {
+		diff_tsc = cur_tsc - prev_tsc;         // 计算时间戳的差值
+		if (unlikely(diff_tsc > drain_tsc)) {  // 如果时间戳差值超过排空阈值，开始对 Tx buffer 执行排空。
 
+			/* 对每个转发目标端口的 Tx buffer 执行排空操作 */
 			for (i = 0; i < qconf->n_tx_port; ++i) {
 				portid = qconf->tx_port_id[i];
 				if (qconf->tx_mbufs[portid].len == 0)
@@ -231,18 +233,15 @@ lpm_main_loop(__attribute__((unused)) void *dummy)
 		for (i = 0; i < qconf->n_rx_queue; ++i) {
 			portid = qconf->rx_queue_list[i].port_id;
 			queueid = qconf->rx_queue_list[i].queue_id;
-			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-				MAX_PKT_BURST);
+			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst, MAX_PKT_BURST);
 			if (nb_rx == 0)
 				continue;
 
-#if defined RTE_ARCH_X86 || defined RTE_MACHINE_CPUFLAG_NEON \
-			 || defined RTE_ARCH_PPC_64
-			l3fwd_lpm_send_packets(nb_rx, pkts_burst,
-						portid, qconf);
+// 进入转发处理流程，编辑 pkt header。
+#if defined RTE_ARCH_X86 || defined RTE_MACHINE_CPUFLAG_NEON || defined RTE_ARCH_PPC_64
+			l3fwd_lpm_send_packets(nb_rx, pkts_burst, portid, qconf);  // 对于 x86 系统架构的，使用优化 buffer 的转发方法
 #else
-			l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst,
-							portid, qconf);
+			l3fwd_lpm_no_opt_send_packets(nb_rx, pkts_burst, portid, qconf);  // 否则是普通的 tx buffer 转发方法
 #endif /* X86 */
 		}
 	}
@@ -250,6 +249,18 @@ lpm_main_loop(__attribute__((unused)) void *dummy)
 	return 0;
 }
 
+/* 以十点分格式输出 uint32_t IP 地址 */
+static void print_ip_address(uint32_t ip_address, uint8_t depth, uint8_t if_out) {
+    printf("LPM: Adding route IPv4 %d.%d.%d.%d / %d (%d)\n",
+           (ip_address >> 24) & 0xFF,  // 取第 1 个 8bit（0xFF）
+           (ip_address >> 16) & 0xFF,  // 取第 2 个 8bit
+           (ip_address >> 8) & 0xFF,   // 取第 3 个 8bit
+           ip_address & 0xFF,          // 取第 4 个 8bit
+		   depth,
+		   if_out);
+}
+
+/* 初始化 LPM table。*/
 void
 setup_lpm(const int socketid)
 {
@@ -260,40 +271,39 @@ setup_lpm(const int socketid)
 	char s[64];
 
 	/* create the LPM table */
-	config_ipv4.max_rules = IPV4_L3FWD_LPM_MAX_RULES;
-	config_ipv4.number_tbl8s = IPV4_L3FWD_LPM_NUMBER_TBL8S;
+	config_ipv4.max_rules = IPV4_L3FWD_LPM_MAX_RULES;        // 条目数量
+	config_ipv4.number_tbl8s = IPV4_L3FWD_LPM_NUMBER_TBL8S;  // 支持 8 个二进制位的前缀匹配。
 	config_ipv4.flags = 0;
 	snprintf(s, sizeof(s), "IPV4_L3FWD_LPM_%d", socketid);
-	ipv4_l3fwd_lpm_lookup_struct[socketid] =
-			rte_lpm_create(s, socketid, &config_ipv4);
+
+	/* 创建 LPM table。*/
+	ipv4_l3fwd_lpm_lookup_struct[socketid] = rte_lpm_create(s, socketid, &config_ipv4);
 	if (ipv4_l3fwd_lpm_lookup_struct[socketid] == NULL)
 		rte_exit(EXIT_FAILURE,
 			"Unable to create the l3fwd LPM table on socket %d\n",
 			socketid);
 
-	/* populate the LPM table */
+	/* 填充 LPM table。*/
 	for (i = 0; i < IPV4_L3FWD_LPM_NUM_ROUTES; i++) {
 
 		/* skip unused ports */
-		if ((1 << ipv4_l3fwd_lpm_route_array[i].if_out &
-				enabled_port_mask) == 0)
+		if ((1 << ipv4_l3fwd_lpm_route_array[i].if_out & enabled_port_mask) == 0)
 			continue;
 
-		ret = rte_lpm_add(ipv4_l3fwd_lpm_lookup_struct[socketid],
+		/* 添加 LPM entry 到指定 NUMA socket 的 LPM table，成功则返回 0。*/
+		ret = rte_lpm_add(
+			ipv4_l3fwd_lpm_lookup_struct[socketid],
 			ipv4_l3fwd_lpm_route_array[i].ip,
 			ipv4_l3fwd_lpm_route_array[i].depth,
 			ipv4_l3fwd_lpm_route_array[i].if_out);
-
 		if (ret < 0) {
 			rte_exit(EXIT_FAILURE,
 				"Unable to add entry %u to the l3fwd LPM table on socket %d\n",
 				i, socketid);
 		}
-
-		printf("LPM: Adding route 0x%08x / %d (%d)\n",
-			(unsigned)ipv4_l3fwd_lpm_route_array[i].ip,
-			ipv4_l3fwd_lpm_route_array[i].depth,
-			ipv4_l3fwd_lpm_route_array[i].if_out);
+		print_ip_address(ipv4_l3fwd_lpm_route_array[i].ip,
+						 ipv4_l3fwd_lpm_route_array[i].depth,
+						 ipv4_l3fwd_lpm_route_array[i].if_out);
 	}
 
 	/* create the LPM6 table */
@@ -369,6 +379,7 @@ lpm_check_ptype(int portid)
 
 }
 
+/* 软件方式解析 mbuf 的 packet header type。*/
 static inline void
 lpm_parse_ptype(struct rte_mbuf *m)
 {

@@ -35,8 +35,8 @@ rfc1812_process(struct ipv4_hdr *ipv4_hdr, uint16_t *dp, uint32_t ptype)
 	if (RTE_ETH_IS_IPV4_HDR(ptype)) {
 		ihl = ipv4_hdr->version_ihl - IPV4_MIN_VER_IHL;
 
-		ipv4_hdr->time_to_live--;
-		ipv4_hdr->hdr_checksum++;
+		ipv4_hdr->time_to_live--;  // TTL-1
+		ipv4_hdr->hdr_checksum++;  // CheckSum+1
 
 		if (ihl > IPV4_MAX_VER_IHL_DIFF ||
 				((uint8_t)ipv4_hdr->total_length == 0 &&

@@ -87,10 +87,10 @@ union ipv6_5tuple_host {
 };
 
 
-
+/* 定义 Hash entry */
 struct ipv4_l3fwd_em_route {
-	struct ipv4_5tuple key;
-	uint8_t if_out;
+	struct ipv4_5tuple key;  // 五元组哈希值
+	uint8_t if_out;          // 下一跳
 };
 
 struct ipv6_l3fwd_em_route {
@@ -98,7 +98,9 @@ struct ipv6_l3fwd_em_route {
 	uint8_t if_out;
 };
 
+/* 初始 Hash enties */
 static struct ipv4_l3fwd_em_route ipv4_l3fwd_em_route_array[] = {
+	// 目的IP地址          源IP地址             目的/源端口号 协议类型   下一跳
 	{{IPv4(101, 0, 0, 0), IPv4(100, 10, 0, 1),  101, 11, IPPROTO_TCP}, 0},
 	{{IPv4(201, 0, 0, 0), IPv4(200, 20, 0, 1),  102, 12, IPPROTO_TCP}, 1},
 	{{IPv4(111, 0, 0, 0), IPv4(100, 30, 0, 1),  101, 11, IPPROTO_TCP}, 2},
@@ -142,11 +144,11 @@ ipv4_hash_crc(const void *data, __rte_unused uint32_t data_len,
 	t = k->proto;
 	p = (const uint32_t *)&k->port_src;
 
-#ifdef EM_HASH_CRC
-	init_val = rte_hash_crc_4byte(t, init_val);
-	init_val = rte_hash_crc_4byte(k->ip_src, init_val);
-	init_val = rte_hash_crc_4byte(k->ip_dst, init_val);
-	init_val = rte_hash_crc_4byte(*p, init_val);
+#ifdef EM_HASH_CRC  // 基于 single crc32 CPU 指令的 4byte Hash 值计算。
+	init_val = rte_hash_crc_4byte(t, init_val);          // protocol
+	init_val = rte_hash_crc_4byte(k->ip_src, init_val);  // srcIP
+	init_val = rte_hash_crc_4byte(k->ip_dst, init_val);  // dstIP
+	init_val = rte_hash_crc_4byte(*p, init_val);         // srcPort
 #else
 	init_val = rte_jhash_1word(t, init_val);
 	init_val = rte_jhash_1word(k->ip_src, init_val);
@@ -343,27 +345,29 @@ convert_ipv6_5tuple(struct ipv6_5tuple *key1,
 #define ALL_32_BITS 0xffffffff
 #define BIT_8_TO_15 0x0000ff00
 
+/* 填充 IPv4 Hash table。*/
 static inline void
 populate_ipv4_few_flow_into_table(const struct rte_hash *h)
 {
 	uint32_t i;
 	int32_t ret;
 
-	mask0 = (rte_xmm_t){.u32 = {BIT_8_TO_15, ALL_32_BITS,
-				ALL_32_BITS, ALL_32_BITS} };
+	mask0 = (rte_xmm_t){.u32 = {BIT_8_TO_15, ALL_32_BITS, ALL_32_BITS, ALL_32_BITS} };
 
 	for (i = 0; i < IPV4_L3FWD_EM_NUM_ROUTES; i++) {
 		struct ipv4_l3fwd_em_route  entry;
 		union ipv4_5tuple_host newkey;
 
-		entry = ipv4_l3fwd_em_route_array[i];
+		entry = ipv4_l3fwd_em_route_array[i];  // 预定义的 Hash entry
 		convert_ipv4_5tuple(&entry.key, &newkey);
+
+		/* 添加一条 Hash entry 到 Hash table 中，返回 entry key（id）。*/
 		ret = rte_hash_add_key(h, (void *) &newkey);
 		if (ret < 0) {
 			rte_exit(EXIT_FAILURE, "Unable to add entry %" PRIu32
 				" to the l3fwd hash.\n", i);
 		}
-		ipv4_l3fwd_out_if[ret] = entry.if_out;
+		ipv4_l3fwd_out_if[ret] = entry.if_out;  // 将 entry key 与 out interfface 建立全局映射，方便后续查找
 	}
 	printf("Hash: Adding 0x%" PRIx64 " keys\n",
 		(uint64_t)IPV4_L3FWD_EM_NUM_ROUTES);
@@ -699,12 +703,13 @@ em_main_loop(__attribute__((unused)) void *dummy)
 void
 setup_hash(const int socketid)
 {
+	/* 定义 IPv4 Hash table 的字段 */
 	struct rte_hash_parameters ipv4_l3fwd_hash_params = {
-		.name = NULL,
-		.entries = L3FWD_HASH_ENTRIES,
-		.key_len = sizeof(union ipv4_5tuple_host),
-		.hash_func = ipv4_hash_crc,
-		.hash_func_init_val = 0,
+		.name = NULL,                                // 条目名称
+		.entries = L3FWD_HASH_ENTRIES,               // 条目数量 4MB
+		.key_len = sizeof(union ipv4_5tuple_host),   // 条目长度，最长可存储 IP 5-tuple
+		.hash_func = ipv4_hash_crc,                  // Hash 函数
+		.hash_func_init_val = 0,                     // Init value used by hash_func
 	};
 
 	struct rte_hash_parameters ipv6_l3fwd_hash_params = {
@@ -721,8 +726,7 @@ setup_hash(const int socketid)
 	snprintf(s, sizeof(s), "ipv4_l3fwd_hash_%d", socketid);
 	ipv4_l3fwd_hash_params.name = s;
 	ipv4_l3fwd_hash_params.socket_id = socketid;
-	ipv4_l3fwd_em_lookup_struct[socketid] =
-		rte_hash_create(&ipv4_l3fwd_hash_params);
+	ipv4_l3fwd_em_lookup_struct[socketid] = rte_hash_create(&ipv4_l3fwd_hash_params);  // 在指定的 NUMA socket 中，创建一个新的 IPv4 Hash table。
 	if (ipv4_l3fwd_em_lookup_struct[socketid] == NULL)
 		rte_exit(EXIT_FAILURE,
 			"Unable to create the l3fwd hash on socket %d\n",

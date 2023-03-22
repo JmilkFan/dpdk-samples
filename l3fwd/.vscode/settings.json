@@ -3,6 +3,6 @@
         "in.h": "c",
         "rte_log.h": "c",
         "rte_common.h": "c",
-        "rte_debug.h": "c"
+        "rte_debug.h": "c",
     }
 }

@@ -81,6 +81,10 @@ volatile bool force_quit;
 uint64_t dest_eth_addr[RTE_MAX_ETHPORTS];
 struct ether_addr ports_eth_addr[RTE_MAX_ETHPORTS];
 
+/**
+ * xmm_t 数组类型。
+ * xmm_t 是 Intel CPU 中使用的 128bit 寄存器类型，通常用于存储 SIMD（单指令多数据）指令集的结果。xmm_t 类型可以使用 CPU 的矢量指令进行高效处理。
+ */
 xmm_t val_eth[RTE_MAX_ETHPORTS];
 
 /* mask of enabled ports */
@@ -92,6 +96,7 @@ uint32_t hash_entry_number = HASH_ENTRY_NUMBER_DEFAULT;
 
 struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
+/* –config 配置参数。*/
 struct lcore_params {
 	uint16_t port_id;
 	uint8_t queue_id;
@@ -120,8 +125,8 @@ static struct rte_eth_conf port_conf = {
 		.mq_mode = ETH_MQ_RX_RSS,
 		.max_rx_pkt_len = ETHER_MAX_LEN,
 		.split_hdr_size = 0,
-		.offloads = (DEV_RX_OFFLOAD_CRC_STRIP |
-			     DEV_RX_OFFLOAD_CHECKSUM),
+		.offloads = DEV_RX_OFFLOAD_CRC_STRIP,
+		//.offloads = (DEV_RX_OFFLOAD_CRC_STRIP | DEV_RX_OFFLOAD_CHECKSUM),  // 测试机不支持 DEV_RX_OFFLOAD_CHECKSUM
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
@@ -136,6 +141,7 @@ static struct rte_eth_conf port_conf = {
 
 static struct rte_mempool * pktmbuf_pool[NB_SOCKETS];
 
+/* L3 forwarding lookup mode functions interface */
 struct l3fwd_lkp_mode {
 	void  (*setup)(int);
 	int   (*check_ptype)(int);
@@ -159,16 +165,16 @@ static struct l3fwd_lkp_mode l3fwd_em_lkp = {
 static struct l3fwd_lkp_mode l3fwd_lpm_lkp = {
 	.setup                  = setup_lpm,
 	.check_ptype		= lpm_check_ptype,
-	.cb_parse_ptype		= lpm_cb_parse_ptype,
+	.cb_parse_ptype		= lpm_cb_parse_ptype,  // 软件解析 packet protocol type 的回调函数
 	.main_loop              = lpm_main_loop,
 	.get_ipv4_lookup_struct = lpm_get_ipv4_l3fwd_lookup_struct,
 	.get_ipv6_lookup_struct = lpm_get_ipv6_l3fwd_lookup_struct,
 };
 
 /*
- * Setup lookup methods for forwarding.
- * Currently exact-match and longest-prefix-match
- * are supported ones.
+ * 初始化 L3 forwarding lookup 的函数指针
+ * 这里采用了开发设计模式中的策略模式：将不同的算法或行为被封装在不同的策略类中，然后在运行时根据某种条件或配置选择不同的策略。
+ * 这里支持 EM 和 LPM 这两种转发策略，由 -L 或 -E 选项决定。
  */
 static void
 setup_l3fwd_lookup_tables(void)
@@ -181,6 +187,10 @@ setup_l3fwd_lookup_tables(void)
 		l3fwd_lkp = l3fwd_lpm_lkp;
 }
 
+/**
+ * lcore 属性检查。
+ * 包括：lcore 的 Rx queue pre port 是否超标、lcore 是否 enabled 等。
+*/
 static int
 check_lcore_params(void)
 {
@@ -208,6 +218,7 @@ check_lcore_params(void)
 	return 0;
 }
 
+/* 检查 --config 的 Ports 和 -p PORTMASK 是否一致。*/
 static int
 check_port_config(void)
 {
@@ -247,6 +258,9 @@ get_port_n_rx_queues(const uint16_t port)
 	return (uint8_t)(++queue);
 }
 
+/**
+ * 将 --config(port,rx_queue,lcore)[,(port,rx_queue,lcore)] 选项参数，注入到 lcore_config 中。
+ */
 static int
 init_lcore_rx_queues(void)
 {
@@ -261,10 +275,8 @@ init_lcore_rx_queues(void)
 				(unsigned)nb_rx_queue + 1, (unsigned)lcore);
 			return -1;
 		} else {
-			lcore_conf[lcore].rx_queue_list[nb_rx_queue].port_id =
-				lcore_params[i].port_id;
-			lcore_conf[lcore].rx_queue_list[nb_rx_queue].queue_id =
-				lcore_params[i].queue_id;
+			lcore_conf[lcore].rx_queue_list[nb_rx_queue].port_id = lcore_params[i].port_id;
+			lcore_conf[lcore].rx_queue_list[nb_rx_queue].queue_id =	lcore_params[i].queue_id;
 			lcore_conf[lcore].n_rx_queue++;
 		}
 	}
@@ -509,7 +521,7 @@ parse_args(int argc, char **argv)
 				lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
-		/* portmask */
+		/* -p PORTMASK：指定要使用的 Ports 的十六进制位掩码（Bitmap）。*/
 		case 'p':
 			enabled_port_mask = parse_portmask(optarg);
 			if (enabled_port_mask == 0) {
@@ -518,20 +530,20 @@ parse_args(int argc, char **argv)
 				return -1;
 			}
 			break;
-
+		/* -P：将所有 Ports 都设置为混杂模式，使得无论 Frame 的 dstMAC 是不是本地网卡都可以接收。*/
 		case 'P':
 			promiscuous_on = 1;
 			break;
-
+		/* -E：启用精确匹配算法（Exact match）。*/
 		case 'E':
 			l3fwd_em_on = 1;
 			break;
-
+		/* -L：启动最长前缀匹配算法（Longest prefix match）。*/
 		case 'L':
 			l3fwd_lpm_on = 1;
 			break;
 
-		/* long options */
+		/* --config：指示 port、queue、lcore 的映射关系。和 -l {lcore_list} 、-p {PORTMASK} 都要能够对应上。*/
 		case CMD_LINE_OPT_CONFIG_NUM:
 			ret = parse_config(optarg);
 			if (ret) {
@@ -540,19 +552,23 @@ parse_args(int argc, char **argv)
 				return -1;
 			}
 			break;
-
+		/* –eth dest：指示 PortX 的 dstMAC 地址。*/
 		case CMD_LINE_OPT_ETH_DEST_NUM:
 			parse_eth_dest(optarg);
 			break;
-
+		/* –no-numa：禁用 NUMA 亲和。*/
 		case CMD_LINE_OPT_NO_NUMA_NUM:
 			numa_on = 0;
 			break;
-
+		/* Optional, set if running ipv6 packets. */
 		case CMD_LINE_OPT_IPV6_NUM:
 			ipv6 = 1;
 			break;
-
+		/**
+		 * –enable-jumbo：启用 Jumbo 数据帧。
+		 * Jumbo 数据帧是一种比标准以太网帧（MTU 1500Byte）更大的数据帧。它的 MTU 可达 9000Byte，这使得它比标准以太网帧能够承载更多的数据。
+		 * Jumbo 数据帧需要被所有传输数据的设备都支持，否则就会出现传输错误或丢失数据的情况。
+		 */
 		case CMD_LINE_OPT_ENABLE_JUMBO_NUM: {
 			const struct option lenopts = {
 				"max-pkt-len", required_argument, 0, 0
@@ -562,8 +578,9 @@ parse_args(int argc, char **argv)
 			port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
 
 			/*
+			 * –max-pkt-len：在启用 Jumbo 的前提下，以十进制表示最大的 MTU。
 			 * if no max-pkt-len set, use the default
-			 * value ETHER_MAX_LEN.
+			 * value ETHER_MAX_LEN （9600Byte）
 			 */
 			if (getopt_long(argc, argvopt, "",
 					&lenopts, &option_index) == 0) {
@@ -578,7 +595,7 @@ parse_args(int argc, char **argv)
 			}
 			break;
 		}
-
+		/* –hash-entry-num：指示十六进制 HASH Entry 的数量。*/
 		case CMD_LINE_OPT_HASH_ENTRY_NUM_NUM:
 			ret = parse_hash_entry_number(optarg);
 			if ((ret > 0) && (ret <= L3FWD_HASH_ENTRIES)) {
@@ -589,7 +606,7 @@ parse_args(int argc, char **argv)
 				return -1;
 			}
 			break;
-
+		/* –parse-ptype：指示使用软件的方式分析数据包的 protocol type（协议类型），默认采用硬件分析的方式。*/
 		case CMD_LINE_OPT_PARSE_PTYPE_NUM:
 			printf("soft parse-ptype is enabled\n");
 			parse_ptype = 1;
@@ -602,7 +619,7 @@ parse_args(int argc, char **argv)
 	}
 
 	/* If both LPM and EM are selected, return error. */
-	if (l3fwd_lpm_on && l3fwd_em_on) {
+	if (l3fwd_lpm_on && l3fwd_em_on) {  // Exact match 和 LPM 只能选一种
 		fprintf(stderr, "LPM and EM are mutually exclusive, select only one\n");
 		return -1;
 	}
@@ -611,7 +628,7 @@ parse_args(int argc, char **argv)
 	 * Nothing is selected, pick longest-prefix match
 	 * as default match.
 	 */
-	if (!l3fwd_lpm_on && !l3fwd_em_on) {
+	if (!l3fwd_lpm_on && !l3fwd_em_on) {  // 如果两者都没选，默认选择 LPM
 		fprintf(stderr, "LPM or EM none selected, default LPM on\n");
 		l3fwd_lpm_on = 1;
 	}
@@ -621,7 +638,7 @@ parse_args(int argc, char **argv)
 	 * exact macth, reset them to default for
 	 * longest-prefix match.
 	 */
-	if (l3fwd_lpm_on) {
+	if (l3fwd_lpm_on) {  // 如果选择了 LPM，不适用 IPv6 和 EM hash。
 		ipv6 = 0;
 		hash_entry_number = HASH_ENTRY_NUMBER_DEFAULT;
 	}
@@ -665,6 +682,7 @@ init_mem(unsigned nb_mbuf)
 				socketid, lcore_id, NB_SOCKETS);
 		}
 
+		/* 在指定的 NUMA socket 上新建 Memory pool 用于存储 mbufs。*/
 		if (pktmbuf_pool[socketid] == NULL) {
 			snprintf(s, sizeof(s), "mbuf_pool_%d", socketid);
 			pktmbuf_pool[socketid] =
@@ -679,14 +697,12 @@ init_mem(unsigned nb_mbuf)
 				printf("Allocated mbuf pool on socket %d\n",
 					socketid);
 
-			/* Setup either LPM or EM(f.e Hash).  */
+			/* Setup either LPM or EM */
 			l3fwd_lkp.setup(socketid);
 		}
 		qconf = &lcore_conf[lcore_id];
-		qconf->ipv4_lookup_struct =
-			l3fwd_lkp.get_ipv4_lookup_struct(socketid);
-		qconf->ipv6_lookup_struct =
-			l3fwd_lkp.get_ipv6_lookup_struct(socketid);
+		qconf->ipv4_lookup_struct = l3fwd_lkp.get_ipv4_lookup_struct(socketid);  // 获得 IPv6 lookup table
+		qconf->ipv6_lookup_struct = l3fwd_lkp.get_ipv6_lookup_struct(socketid);
 	}
 	return 0;
 }
@@ -765,6 +781,7 @@ prepare_ptype_parser(uint16_t portid, uint16_t queueid)
 {
 	if (parse_ptype) {
 		printf("Port %d: softly parse packet type info\n", portid);
+		/* 注册软件实现的数据包类型解析函数。*/
 		if (rte_eth_add_rx_callback(portid, queueid,
 					    l3fwd_lkp.cb_parse_ptype,
 					    NULL))
@@ -782,6 +799,20 @@ prepare_ptype_parser(uint16_t portid, uint16_t queueid)
 	return 0;
 }
 
+static void print_binary_mac_mapping(const char *var_name, uint64_t num) {
+	// 以二进制格式输出
+    printf("%s Binary: ", var_name);
+	int i;
+    for (i = 47; i >= 0; i--) {  // 取 6 * 8bit MAC 地址位
+        printf("%d", (uint8_t)((num >> i) & 1));
+    }
+    printf(", ");
+
+	// 以 MAC 地址输出
+	print_ethaddr("MAC: ", (const struct ether_addr *)&num);
+	printf("\n");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -795,7 +826,7 @@ main(int argc, char **argv)
 	uint32_t n_tx_queue, nb_lcores;
 	uint8_t nb_rx_queue, queue, socketid;
 
-	/* init EAL */
+	/* 根据 EAL options 初始化 EAL 环境设置。*/
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL parameters\n");
@@ -806,14 +837,20 @@ main(int argc, char **argv)
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 
-	/* pre-init dst MACs for all ports to 02:00:00:00:00:xx */
+	/**
+	 * 初始化 dstMAC-Port 映射表。
+	 * L3fwd 没有 ARP 协议，所以如果没有使用 –eth dest 显式指定 Ports 的 dstMAC，则会使用默认的 02:00:00:00:00:{portid} 地址。
+	 */
 	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
-		dest_eth_addr[portid] =
-			ETHER_LOCAL_ADMIN_ADDR + ((uint64_t)portid << 40);
-		*(uint64_t *)(val_eth + portid) = dest_eth_addr[portid];
+		dest_eth_addr[portid] = ETHER_LOCAL_ADMIN_ADDR + ((uint64_t)portid << 40);
+		*(uint64_t *)(val_eth + portid) = dest_eth_addr[portid];  // 将 dstMAC 的值存储到 val_eth 数组的第 portid 个元素
+#ifdef DEBUG
+		printf("portid: %d, ", portid);
+		print_binary_mac_mapping("dest_eth_addr[portid]", dest_eth_addr[portid]);
+#endif
 	}
 
-	/* parse application arguments (after the EAL ones) */
+	/* 提供除了 EAL options 之外的 L2fwd 专属的 CLI options。*/
 	ret = parse_args(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid L3FWD parameters\n");
@@ -825,20 +862,26 @@ main(int argc, char **argv)
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "init_lcore_rx_queues failed\n");
 
+	/* 获取可用的 Ethernet ports。*/
 	nb_ports = rte_eth_dev_count_avail();
+	if (nb_ports == 0)
+		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
 
 	if (check_port_config() < 0)
 		rte_exit(EXIT_FAILURE, "check_port_config failed\n");
 
+	/* 获取 lcore 数量，从 -l {lcore_list} 或 -c {cpumask} 中获取。*/
 	nb_lcores = rte_lcore_count();
 
-	/* Setup function pointers for lookup method. */
+	/* 注册 LPM 或 EM 操作函数接口 */
 	setup_l3fwd_lookup_tables();
 
-	/* initialize all ports */
+	/**
+	 * 宏 RTE_ETH_FOREACH_DEV 是一个 for 循环，用于遍历系统中所有已初始化且无所有者的 Ports。
+	 */
 	RTE_ETH_FOREACH_DEV(portid) {
-		struct rte_eth_conf local_port_conf = port_conf;
-
+		struct rte_eth_conf local_port_conf = port_conf;  // 预定义的 l3fwd port configuration。
+		
 		/* skip ports that are not enabled */
 		if ((enabled_port_mask & (1 << portid)) == 0) {
 			printf("\nSkipping disabled port %d\n", portid);
@@ -857,14 +900,14 @@ main(int argc, char **argv)
 			nb_rx_queue, (unsigned)n_tx_queue );
 
 		rte_eth_dev_info_get(portid, &dev_info);
-		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
-			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
 
-		local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
-			dev_info.flow_type_rss_offloads;
-		if (local_port_conf.rx_adv_conf.rss_conf.rss_hf !=
-				port_conf.rx_adv_conf.rss_conf.rss_hf) {
+		/* 如果 Ethernet device 支持 Multi-segment send，则更新到 Port config，后面设置 Ethernet device 的配置时使用。*/
+		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+			local_port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+
+		/* 如果 Ethernet device 支持 RSS，则更新到 Port config，后面设置 Ethernet device 的配置时使用。*/
+		local_port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+		if (local_port_conf.rx_adv_conf.rss_conf.rss_hf != port_conf.rx_adv_conf.rss_conf.rss_hf) {
 			printf("Port %u modified RSS hash function based on hardware support,"
 				"requested:%#"PRIx64" configured:%#"PRIx64"\n",
 				portid,
@@ -872,6 +915,12 @@ main(int argc, char **argv)
 				local_port_conf.rx_adv_conf.rss_conf.rss_hf);
 		}
 
+		/**
+		 * 设置 Ethernet device 的配置。
+		 * nb_rx_queue 由 --config(queue) 的数量决定；
+		 * n_tx_queue 与 lcore 数量相同。
+		 * NOTE（fguiju）：如果 Ethernet device 不支持 Multi-queue，那么应该只使用 1 个 lcore。
+		 */
 		ret = rte_eth_dev_configure(portid, nb_rx_queue,
 					(uint16_t)n_tx_queue, &local_port_conf);
 		if (ret < 0)
@@ -879,8 +928,8 @@ main(int argc, char **argv)
 				"Cannot configure device: err=%d, port=%d\n",
 				ret, portid);
 
-		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
-						       &nb_txd);
+		/* 调整（adjust）Ethernet device 的 Rx/Tx queue 的 descriptors 数量，默认为 1024 个。*/
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE,
 				 "Cannot adjust number of descriptors: err=%d, "
@@ -894,35 +943,35 @@ main(int argc, char **argv)
 		printf(", ");
 
 		/*
-		 * prepare src MACs for each port.
+		 * prepare srcMACs for each port.
 		 */
-		ether_addr_copy(&ports_eth_addr[portid],
-			(struct ether_addr *)(val_eth + portid) + 1);
+		ether_addr_copy(&ports_eth_addr[portid], (struct ether_addr *)(val_eth + portid) + 1);  // Fast copy an Ethernet address.
 
-		/* init memory */
+		/* 分配内存，设置 LPM 或 Hash 静态路由表 */
 		ret = init_mem(NB_MBUF);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "init_mem failed\n");
-
-		/* init one TX queue per couple (lcore,port) */
+	
+		/**
+		 * 为每个 Port 设置 lcore 个 Tx queue。
+		 * e.g. -l 1,2 -- --config="(0,0,1),(1,0,2)" 表示在 Port 0，1 上分别创建 lcore 1，2 的 2 个 Tx queue。
+		 */
 		queueid = 0;
 		for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
 			if (rte_lcore_is_enabled(lcore_id) == 0)
 				continue;
 
 			if (numa_on)
-				socketid =
-				(uint8_t)rte_lcore_to_socket_id(lcore_id);
+				socketid = (uint8_t)rte_lcore_to_socket_id(lcore_id);
 			else
 				socketid = 0;
 
-			printf("txq=%u,%d,%d ", lcore_id, queueid, socketid);
+			printf("txq = lcore(%u), tx_queue(%d), numa_socket(%d) ", lcore_id, queueid, socketid);
 			fflush(stdout);
 
 			txconf = &dev_info.default_txconf;
 			txconf->offloads = local_port_conf.txmode.offloads;
-			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
-						     socketid, txconf);
+			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd, socketid, txconf);
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE,
 					"rte_eth_tx_queue_setup: err=%d, "
@@ -941,10 +990,16 @@ main(int argc, char **argv)
 	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
 		if (rte_lcore_is_enabled(lcore_id) == 0)
 			continue;
-		qconf = &lcore_conf[lcore_id];
-		printf("\nInitializing rx queues on lcore %u ... ", lcore_id );
+
+		printf("\nInitializing rx queues on lcore %u ... ", lcore_id);
 		fflush(stdout);
-		/* init RX queues */
+		
+		qconf = &lcore_conf[lcore_id];
+
+		/**
+		 * 为每个 Port 设置 --config 个 Rx queues。
+		 * e.g. --config="(0,0,1),(0,1,1),(1,0,1),(1,1,1)" 表示在 Port 0，1 上分别都设置 0，1 两个 Rx queue。
+		 */
 		for(queue = 0; queue < qconf->n_rx_queue; ++queue) {
 			struct rte_eth_dev *dev;
 			struct rte_eth_conf *conf;
@@ -961,12 +1016,12 @@ main(int argc, char **argv)
 			else
 				socketid = 0;
 
-			printf("rxq=%d,%d,%d ", portid, queueid, socketid);
+			printf("rxq = lcore(%u), rx_queue(%d), numa_socket(%d) ", lcore_id, queueid, socketid);			
 			fflush(stdout);
 
 			rte_eth_dev_info_get(portid, &dev_info);
 			rxq_conf = dev_info.default_rxconf;
-			rxq_conf.offloads = conf->rxmode.offloads;
+ 			rxq_conf.offloads = conf->rxmode.offloads;
 			ret = rte_eth_rx_queue_setup(portid, queueid, nb_rxd,
 					socketid,
 					&rxq_conf,
@@ -998,7 +1053,7 @@ main(int argc, char **argv)
 		 * to itself through 2 cross-connected  ports of the
 		 * target machine.
 		 */
-		if (promiscuous_on)
+		if (promiscuous_on) // 设置混杂模式
 			rte_eth_promiscuous_enable(portid);
 	}
 
@@ -1016,7 +1071,7 @@ main(int argc, char **argv)
 		}
 	}
 
-
+	/* 检查链路状态 */
 	check_all_ports_link_status(enabled_port_mask);
 
 	ret = 0;

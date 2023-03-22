@@ -52,5 +52,11 @@ CFLAGS += -I$(SRCDIR)
 CFLAGS += -O3 $(USER_FLAGS)
 CFLAGS += $(WERROR_FLAGS)
 
+################
+# NOTE：fguiju
+# 添加 DEBUG 参数
+CFLAGS += -g3 -DDEBUG
+################
+
 include $(RTE_SDK)/mk/rte.extapp.mk
 endif
